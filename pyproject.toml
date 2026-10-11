@@ -1,6 +1,6 @@
 [project]
 name = "maibot-telegram-adapter"
-version = "0.1.9"
+version = "0.1.10"
 description = "Telegram Bot API message gateway for MaiBot"
 requires-python = ">=3.12"
 dependencies = [

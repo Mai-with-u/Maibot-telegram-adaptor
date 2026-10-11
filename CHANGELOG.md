@@ -1,5 +1,11 @@
 # 更新日志
 
+## 0.1.10
+
+### 细节
+
+- 插件标识：将 manifest ID 修正为 `maibot-team.telegram-adapter`，与 SnowLuma、NapCat 适配器的团队命名空间保持一致。
+
 ## 0.1.9
 
 ### 细节
