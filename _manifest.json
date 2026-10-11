@@ -1,12 +1,17 @@
 {
   "manifest_version": 2,
   "id": "maibot-team.telegram-adapter",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "name": "Telegram 适配器",
   "description": "单账号 Telegram Bot API 适配器，支持论坛话题、文本、图片、静态/动画/视频贴纸、语音、@、回复引用和转发。",
-  "author": {"name": "Sengoku", "url": "https://github.com/Mai-with-u"},
+  "author": {"name": "MaiBot Team", "url": "https://github.com/Mai-with-u"},
   "license": "MIT",
-  "urls": {"repository": "https://github.com/Mai-with-u/Maibot-telegram-adaptor"},
+  "urls": {
+    "repository": "https://github.com/Mai-with-u/Maibot-telegram-adaptor",
+    "homepage": "https://github.com/Mai-with-u/Maibot-telegram-adaptor",
+    "documentation": "https://github.com/Mai-with-u/Maibot-telegram-adaptor/blob/main/README.md",
+    "issues": "https://github.com/Mai-with-u/Maibot-telegram-adaptor/issues"
+  },
   "changelog": "CHANGELOG.md",
   "plugin_type": "adapter",
   "host_application": {"min_version": "1.3.6", "max_version": "1.3.99"},
