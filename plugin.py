@@ -301,10 +301,8 @@ class TelegramAdapterPlugin(MaiBotPlugin):
         del kwargs
         if not session_id or not self._ready or self._client is None:
             return {"action": "continue"}
-        response = await self.ctx.chat.get_all_streams(platform=PLATFORM)
-        if not response["success"]:
-            raise RuntimeError(f"查询聊天流失败: {response['error']}")
-        matches = [stream for stream in response["streams"] if stream["session_id"] == session_id]
+        streams = await self._get_streams()
+        matches = [stream for stream in streams if stream["session_id"] == session_id]
         if len(matches) != 1:
             return {"action": "continue"}
         stream = matches[0]
@@ -314,6 +312,15 @@ class TelegramAdapterPlugin(MaiBotPlugin):
         chat_id, thread_id = parse_group_id(target_id)
         self._start_typing(chat_id, thread_id, self._client)
         return {"action": "continue"}
+
+    async def _get_streams(self) -> List[Dict[str, Any]]:
+        # SDK 已将 Host 的 success/streams 信封解包，成功时直接返回聊天流列表。
+        streams = await self.ctx.chat.get_all_streams(platform=PLATFORM)
+        if isinstance(streams, dict) and streams.get("success") is False:
+            raise RuntimeError(f"查询聊天流失败: {streams['error']}")
+        if not isinstance(streams, list):
+            raise TypeError("SDK chat.get_all_streams 必须返回聊天流列表")
+        return streams
 
     def _start_typing(self, chat_id: int, thread_id: Optional[int], client: TelegramClient) -> None:
         target = (chat_id, thread_id)
@@ -382,18 +389,16 @@ class TelegramAdapterPlugin(MaiBotPlugin):
                 raise ValueError("表态工具仅支持当前 Telegram 聊天")
             if not isinstance(msg_id, str) or not msg_id.strip() or not isinstance(emoji, str):
                 raise ValueError("必须提供有效的 msg_id 和字符串 emoji")
-            streams = await self.ctx.chat.get_all_streams(platform=PLATFORM)
-            if not streams["success"]:
-                raise RuntimeError(f"查询聊天流失败: {streams['error']}")
-            matches = [stream for stream in streams["streams"] if stream["session_id"] == stream_id]
+            streams = await self._get_streams()
+            matches = [stream for stream in streams if stream["session_id"] == stream_id]
             if len(matches) != 1:
                 raise ValueError("当前真实 Telegram 聊天流不存在或不唯一")
             stream = matches[0]
             self._action_client(stream["platform"], stream["account_id"], stream["scope"] or "")
-            response = await self.ctx.message.get_by_id(msg_id.strip(), stream_id=stream_id)
-            if not response["success"]:
-                raise RuntimeError(f"查询目标消息失败: {response['error']}")
-            message = response["message"]
+            # 单条消息同样由 SDK 解包，未找到时直接返回 None。
+            message = await self.ctx.message.get_by_id(msg_id.strip(), stream_id=stream_id)
+            if isinstance(message, dict) and message.get("success") is False:
+                raise RuntimeError(f"查询目标消息失败: {message['error']}")
             if message is None or message["session_id"] != stream_id:
                 raise ValueError("目标消息不属于当前真实聊天流")
             if message["platform"] != PLATFORM or message["account_id"] != self._account_id:
