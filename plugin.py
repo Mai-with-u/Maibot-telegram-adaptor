@@ -1,7 +1,7 @@
 from contextlib import suppress
-from typing import Any, ClassVar, Dict, List, Optional, Type
+from typing import Any, ClassVar, Dict, List, Optional, Tuple, Type
 
-from maibot_sdk import API, MaiBotPlugin, MessageGateway, PluginConfigBase
+from maibot_sdk import API, HookHandler, MaiBotPlugin, MessageGateway, PluginConfigBase, Tool
 
 import asyncio
 import hashlib
@@ -20,6 +20,7 @@ from .codec import (
     outbound_target,
     outbound_thread,
     parse_group_id,
+    parse_message_id,
     reply_parameters,
 )
 from .media import prepare_image, sticker_to_image, voice_to_opus, voice_to_wav
@@ -54,6 +55,7 @@ class TelegramAdapterPlugin(MaiBotPlugin):
         self._send_lock = asyncio.Lock()
         self._avatar_lock = asyncio.Lock()
         self._avatar_relay = AvatarRelay()
+        self._typing_tasks: Dict[Tuple[int, Optional[int]], asyncio.Task[None]] = {}
 
     async def on_load(self) -> None:
         self._store = AdapterStore(self.ctx.paths.data_dir / "telegram.sqlite3")
@@ -166,6 +168,8 @@ class TelegramAdapterPlugin(MaiBotPlugin):
             self.ctx.logger.error("Telegram 接收任务停止，未确认的更新将保留: %s", exc, exc_info=True)
         finally:
             self._ready = False
+            for target in list(self._typing_tasks):
+                await self._stop_typing(*target)
             try:
                 await self._set_ready(False)
             finally:
@@ -286,6 +290,155 @@ class TelegramAdapterPlugin(MaiBotPlugin):
         )
         if not accepted:
             self.ctx.logger.info("MaiBot 未接收 Telegram 消息: %s", message["message_id"])
+
+    @HookHandler(
+        "maisaka.replyer.before_request",
+        name="telegram_reply_typing",
+        description="选中 reply 并开始生成回复时显示 Telegram 输入状态",
+        timeout_ms=3000,
+    )
+    async def on_reply_generation(self, session_id: str = "", **kwargs: Any) -> Dict[str, Any]:
+        del kwargs
+        if not session_id or not self._ready or self._client is None:
+            return {"action": "continue"}
+        response = await self.ctx.chat.get_all_streams(platform=PLATFORM)
+        if not response["success"]:
+            raise RuntimeError(f"查询聊天流失败: {response['error']}")
+        matches = [stream for stream in response["streams"] if stream["session_id"] == session_id]
+        if len(matches) != 1:
+            return {"action": "continue"}
+        stream = matches[0]
+        if stream["platform"] != PLATFORM or stream["account_id"] != self._account_id or stream["scope"]:
+            return {"action": "continue"}
+        target_id = stream["group_id"] if stream["is_group_session"] else stream["user_id"]
+        chat_id, thread_id = parse_group_id(target_id)
+        self._start_typing(chat_id, thread_id, self._client)
+        return {"action": "continue"}
+
+    def _start_typing(self, chat_id: int, thread_id: Optional[int], client: TelegramClient) -> None:
+        target = (chat_id, thread_id)
+        if target in self._typing_tasks:
+            return
+        self._typing_tasks[target] = asyncio.create_task(
+            self._refresh_typing(chat_id, thread_id, client), name=f"telegram-typing-{chat_id}-{thread_id}"
+        )
+
+    async def _refresh_typing(self, chat_id: int, thread_id: Optional[int], client: TelegramClient) -> None:
+        body: Dict[str, Any] = {"chat_id": chat_id, "action": "typing"}
+        if thread_id is not None:
+            body["message_thread_id"] = thread_id
+        # Hook 已确认开始生成回复；限制刷新时间，避免生成失败且没有出站消息时任务永久存活。
+        deadline = asyncio.get_running_loop().time() + 180
+        try:
+            while asyncio.get_running_loop().time() < deadline:
+                await asyncio.wait_for(client.call("sendChatAction", body), timeout=5)
+                await asyncio.sleep(4)
+        except (TelegramAPIError, TelegramTransportError, TimeoutError) as exc:
+            # 状态提示失败单独记录，不让它影响消息接收、游标确认或实际回复。
+            self.ctx.logger.warning("Telegram 输入状态发送失败: chat=%s topic=%s error=%s", chat_id, thread_id, exc)
+        finally:
+            self._typing_tasks.pop((chat_id, thread_id), None)
+
+    async def _stop_typing(self, chat_id: int, thread_id: Optional[int]) -> None:
+        task = self._typing_tasks.pop((chat_id, thread_id), None)
+        if task is not None:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+
+    def _action_client(self, platform: str, account_id: str, scope: str) -> TelegramClient:
+        if platform != PLATFORM or scope or account_id != self._account_id:
+            raise ValueError("聊天动作的路由身份与 Telegram 网关不一致")
+        if not self._ready or self._client is None:
+            raise RuntimeError("Telegram 网关尚未就绪")
+        return self._client
+
+    @Tool(
+        "telegram_react_message",
+        platforms="telegram",
+        description=(
+            "仅用于 Telegram：自主选择当前聊天的一条消息添加表态，表达赞同、感谢或情绪，"
+            "也可以只表态而不发文字。每条消息最多一个普通 emoji，再次调用替换自己的表态；"
+            "emoji 为空字符串时撤销自己的表态。可用例如 👍、❤、🔥、🥰、👏、😁、🎉，"
+            "具体受聊天允许的表情限制，不能使用付费表态。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "msg_id": {"type": "string", "description": "当前聊天上下文中的目标消息编号"},
+                "emoji": {"type": "string", "description": "一个普通 emoji；空字符串撤销表态"},
+            },
+            "required": ["msg_id", "emoji"],
+            "additionalProperties": False,
+        },
+        timeout_ms=30000,
+    )
+    async def react_message(
+        self, msg_id: str, emoji: str, stream_id: str = "", platform: str = "", **kwargs: Any
+    ) -> Dict[str, Any]:
+        del kwargs
+        try:
+            if platform != PLATFORM or not stream_id:
+                raise ValueError("表态工具仅支持当前 Telegram 聊天")
+            if not isinstance(msg_id, str) or not msg_id.strip() or not isinstance(emoji, str):
+                raise ValueError("必须提供有效的 msg_id 和字符串 emoji")
+            streams = await self.ctx.chat.get_all_streams(platform=PLATFORM)
+            if not streams["success"]:
+                raise RuntimeError(f"查询聊天流失败: {streams['error']}")
+            matches = [stream for stream in streams["streams"] if stream["session_id"] == stream_id]
+            if len(matches) != 1:
+                raise ValueError("当前真实 Telegram 聊天流不存在或不唯一")
+            stream = matches[0]
+            self._action_client(stream["platform"], stream["account_id"], stream["scope"] or "")
+            response = await self.ctx.message.get_by_id(msg_id.strip(), stream_id=stream_id)
+            if not response["success"]:
+                raise RuntimeError(f"查询目标消息失败: {response['error']}")
+            message = response["message"]
+            if message is None or message["session_id"] != stream_id:
+                raise ValueError("目标消息不属于当前真实聊天流")
+            if message["platform"] != PLATFORM or message["account_id"] != self._account_id:
+                raise ValueError("目标消息的账号与 Telegram 网关不一致")
+            result = await self._set_reaction(
+                platform=PLATFORM,
+                target_id=stream["group_id"] if stream["is_group_session"] else stream["user_id"],
+                message_id=message["message_id"],
+                emoji=emoji,
+                account_id=stream["account_id"],
+                scope=stream["scope"] or "",
+            )
+            result["message"] = "已撤销消息表态" if not emoji else f"已给消息表态 {emoji}"
+            return result
+        except Exception as exc:
+            self.ctx.logger.exception("Telegram 消息表态失败: stream=%s message=%s", stream_id, msg_id)
+            return {"success": False, "error": str(exc)}
+
+    async def _set_reaction(
+        self,
+        platform: str,
+        target_id: str,
+        message_id: str,
+        emoji: str,
+        account_id: str = "",
+        scope: str = "",
+    ) -> Dict[str, Any]:
+        client = self._action_client(platform, account_id, scope)
+        chat_id, _ = parse_group_id(target_id)
+        message_chat_id, telegram_message_id = parse_message_id(message_id)
+        if chat_id != message_chat_id or telegram_message_id <= 0:
+            raise ValueError("表态目标消息不属于当前聊天或消息 ID 无效")
+        if chat_id < 0:
+            group = await self._require_store().message_group(self._account_id, message_id)
+            if group is None or group["group_id"] != target_id:
+                raise ValueError("表态目标消息的话题归属未知或与当前聊天不一致")
+        if not isinstance(emoji, str):
+            raise ValueError("emoji 必须为字符串，空字符串表示撤销表态")
+        # Telegram 会校验群允许的 emoji；不替换不支持的表情，不伪造成功。
+        reaction = [{"type": "emoji", "emoji": emoji}] if emoji else []
+        if await client.call(
+            "setMessageReaction", {"chat_id": chat_id, "message_id": telegram_message_id, "reaction": reaction}
+        ) is not True:
+            raise RuntimeError("Telegram 未确认消息表态")
+        return {"success": True, "message_id": message_id, "emoji": emoji}
 
     @API("adapter.avatar.get", description="获取 Telegram 用户或群头像资源", version="1", public=True)
     async def api_get_avatar(
@@ -438,6 +591,8 @@ class TelegramAdapterPlugin(MaiBotPlugin):
                 # forwardMessage 不接受 reply_parameters，用一条引用引导消息保留回复关系。
                 if reply is not None and prepared[0][0] == "forwardMessage":
                     prepared.insert(0, ("sendMessage", {"text": "转发消息："}, None))
+                # 媒体准备期间继续显示输入；发送前停掉刷新，Telegram 收到回复后自动清除状态。
+                await self._stop_typing(chat_id, thread_id)
                 for index, (method, body, upload) in enumerate(prepared):
                     body = {**body, "chat_id": chat_id}
                     if thread_id is not None:
