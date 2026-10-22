@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "id": "maibot-team.telegram-adapter",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "name": "Telegram 适配器",
   "description": "单账号 Telegram Bot API 适配器，支持论坛话题、文本、图片、静态/动画/视频贴纸、语音、@、回复引用和转发。",
   "author": {"name": "MaiBot Team", "url": "https://github.com/Mai-with-u"},

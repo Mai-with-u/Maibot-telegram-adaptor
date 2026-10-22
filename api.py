@@ -1,5 +1,6 @@
 """异步 Telegram Bot API 客户端；错误信息不包含 Token 或代理凭据。"""
 
+from ssl import SSLError
 from typing import Any, Dict, List, Optional, Tuple, Union
 from urllib.parse import quote, urlsplit
 
@@ -76,7 +77,8 @@ class TelegramClient:
                     }
                     files = {field: (filename, binary, mime) for field, binary, filename, mime in uploads}
                     response = await self.http.post(url, data=fields, files=files)
-            except httpx.RequestError as exc:
+            except (httpx.RequestError, SSLError) as exc:
+                # 底层 TLS 读写异常可能未经 HTTPX 包装；统一交给接收循环重连，不在此重发请求。
                 raise TelegramTransportError(f"Telegram 网络请求失败（{type(exc).__name__}）") from None
             try:
                 result = response.json()
@@ -117,7 +119,8 @@ class TelegramClient:
                     if len(chunks) + len(chunk) > self.max_bytes:
                         raise ValueError("Telegram 媒体超过配置的下载上限")
                     chunks.extend(chunk)
-        except httpx.RequestError as exc:
+        except (httpx.RequestError, SSLError) as exc:
+            # 流式读取中的 TLS 错误也属于连接故障，不能当成坏消息确认更新。
             raise TelegramTransportError(f"Telegram 媒体下载失败（{type(exc).__name__}）") from None
         if not chunks:
             raise ValueError("Telegram 下载的媒体为空")
