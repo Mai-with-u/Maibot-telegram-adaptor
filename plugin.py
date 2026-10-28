@@ -1,7 +1,7 @@
 from contextlib import suppress
 from typing import Any, ClassVar, Dict, List, Optional, Tuple, Type
 
-from maibot_sdk import API, HookHandler, MaiBotPlugin, MessageGateway, PluginConfigBase, Tool
+from maibot_sdk import API, ConfigWidget, ConfigWidgetState, HookHandler, MaiBotPlugin, MessageGateway, PluginConfigBase, Tool
 
 import asyncio
 import hashlib
@@ -42,6 +42,29 @@ def validate_message_size(message: Dict[str, Any]) -> None:
 
 class TelegramAdapterPlugin(MaiBotPlugin):
     config_model: ClassVar[Optional[Type[PluginConfigBase]]] = AdapterSettings
+
+    config_widgets: ClassVar[List[ConfigWidget]] = [
+        ConfigWidget(id="connection", kind="status", label="Telegram 连接状态"),
+        ConfigWidget(id="reconnect", kind="action", label="重新连接"),
+    ]
+
+    async def get_config_widget_state(self) -> Dict[str, ConfigWidgetState]:
+        configured = bool(self.config.telegram.bot_token.strip())
+        text = (f"已连接：@{self._username}" if self._ready
+                else "连接中 / 等待重连" if self._worker is not None and not self._worker.done()
+                else "尚未连接" if configured else "请先填写 Bot Token；Telegram Bot API 无需扫码登录")
+        return {
+            "connection": ConfigWidgetState(text=text, tone="success" if self._ready else "neutral"),
+            "reconnect": ConfigWidgetState(disabled=not configured),
+        }
+
+    async def on_config_widget_action(self, action_id: str) -> None:
+        if action_id != "reconnect":
+            raise ValueError(f"未知配置页操作: {action_id}")
+        async with self._lifecycle_lock:
+            await self._stop()
+            if self.config.plugin.enabled:
+                self._start()
 
     def __init__(self) -> None:
         super().__init__()
