@@ -1,6 +1,6 @@
 [project]
 name = "maibot-telegram-adapter"
-version = "0.1.15"
+version = "0.1.16"
 description = "Telegram Bot API message gateway for MaiBot"
 authors = [{name = "MaiBot Team"}]
 requires-python = ">=3.12"
