@@ -56,6 +56,7 @@ FFmpeg 可执行文件由 `imageio-ffmpeg` 提供；TGS 渲染使用 `rlottie-py
 - 平台消息 ID 使用 `chat_id:message_id`，避免不同聊天的局部消息 ID 冲突。发送回执使用同样格式。
 - 宿主负责聊天流创建与 `session_id` 解析。插件不计算备用会话 ID。
 - @username 无法直接通过 Bot API 查到用户 ID，因此保留 username；`text_mention` 和 @机器人使用明确的用户 ID。
+- 首部 `bot_command` 中匹配当前 `getMe` 用户名的后缀（ASCII 大小写不敏感）会被移除，例如 `/help@My_Bot` 转为 `/help`；其他机器人的后缀保留且不标记为命令。正文、caption 参数和后续 mention 的 UTF-16 索引保持原义。
 - 机器人收到的转发副本 ID 用于再次转发，原来源存入 `additional_config.telegram_forward_origin`，不依赖访问原频道的权限。
 - 出站引用仅由显式 `reply` 消息段决定；宿主 `reply_to` 是上下文锚点，不自动转成 Telegram 引用，确保 `set_quote=false` 生效。
 - `forwardMessage` 不支持回复参数：转发同时带引用时，先发送一条带引用的“转发消息：”，再发送原生转发。
@@ -101,11 +102,14 @@ Telegram 要求机器人为群管理员才会投递表态事件。重载插件�
 在插件目录执行：
 
 ```powershell
-uv sync --group dev
-uv run ruff check .
+uv sync --locked --group dev
+uv run --locked ruff check .
+uv run --locked python -m unittest discover -s tests -v
 ```
 
-真实 Telegram 联调需要有效 Token 和网络，应验证私聊、群聊与论坛话题的收发、表态通知、头像获取及异常处理。仓库不包含测试文件、本地配置、配置备份和运行数据。
+命令解析回归使用合成消息离线运行，不调用 Telegram 或宿主。CI 在 Linux/Python 3.12 和 Windows/Python 3.14 上使用锁定依赖运行 lint、回归和插件导入检查；导入成功不代表扩大 manifest 声明的宿主兼容范围。
+
+真实 Telegram 联调需要有效 Token 和网络，应验证私聊、群聊与论坛话题的收发、表态通知、头像获取及异常处理。仓库不包含本地配置、配置备份和运行数据。
 
 参考：[MaiBot SDK 开发指南](https://github.com/Mai-with-u/maibot-plugin-sdk/blob/main/docs/guide.md)、[Telegram Bot API](https://core.telegram.org/bots/api)、[Telegram Bot FAQ](https://core.telegram.org/bots/faq)。
 

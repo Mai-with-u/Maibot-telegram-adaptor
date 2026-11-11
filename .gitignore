@@ -21,9 +21,5 @@ build/
 *.egg-info/
 .coverage
 htmlcov/
-tests/
-test_*.py
-*_test.py
-conftest.py
 .idea/
 .vscode/
