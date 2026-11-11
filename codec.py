@@ -135,6 +135,19 @@ def decode_message(
     text = payload.get("text", payload.get("caption", ""))
     entities = payload.get("entities", payload.get("caption_entities", []))
     body, mentioned = decode_text(text, entities, bot_id, bot_username)
+    # Only normalize a leading command addressed to the username returned by getMe.
+    command_entity = next((item for item in entities if item["type"] == "bot_command" and item["offset"] == 0), None)
+    is_command = command_entity is not None
+    if command_entity is not None:
+        end = _utf16_index(text, command_entity["length"])
+        command, separator, username = text[:end].partition("@")
+        if separator:
+            is_command = bool(re.fullmatch(r"[A-Za-z0-9_]+", username)) and username.casefold() == bot_username.casefold()
+            if is_command:
+                # Decode mentions using the original UTF-16 offsets before removing the suffix.
+                if not body or body[0]["type"] != "text" or not body[0]["data"].startswith(text[:end]):
+                    raise ValueError("Telegram bot_command 与其他 entity 相互重叠")
+                body[0]["data"] = command + body[0]["data"][end:]
     body.extend(media)
     if not body:
         return None  # 加入/退出等服务消息不作为聊天正文。
@@ -203,7 +216,7 @@ def decode_message(
         "is_mentioned": mentioned,
         "is_picture": any(item["type"] == "image" for item in media),
         "is_emoji": any(item["type"] == "emoji" for item in media),
-        "is_command": any(item["type"] == "bot_command" and item["offset"] == 0 for item in entities),
+        "is_command": is_command,
     }
     if reply_to is not None:
         result["reply_to"] = reply_to
