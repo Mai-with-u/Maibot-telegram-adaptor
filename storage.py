@@ -1,7 +1,8 @@
 """持久化轮询游标、失败更新、贴纸引用与话题路由，所有 SQLite 操作在线程中完成。"""
 
+from contextlib import closing, contextmanager
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterator, Optional
 
 import asyncio
 import json
@@ -13,12 +14,18 @@ class AdapterStore:
     def __init__(self, path: Path) -> None:
         self.path = path
 
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        # sqlite3 的事务上下文只负责提交或回滚，退出后还需关闭连接。
+        with closing(sqlite3.connect(self.path)) as db, db:
+            yield db
+
     async def initialize(self) -> None:
         await asyncio.to_thread(self._initialize)
 
     def _initialize(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(self.path) as db:
+        with self._connect() as db:
             db.execute(
                 "CREATE TABLE IF NOT EXISTS cursors (account TEXT PRIMARY KEY, offset INTEGER NOT NULL, updated_at REAL NOT NULL)"
             )
@@ -46,7 +53,7 @@ class AdapterStore:
         self, account: str, update: Dict[str, Any], error: str, traceback_text: str
     ) -> None:
         # 先保留原始更新再确认游标，二者原子提交；数据库失败时仍保留 Telegram 未确认更新。
-        with sqlite3.connect(self.path) as db:
+        with self._connect() as db:
             now = time.time()
             db.execute(
                 "INSERT OR REPLACE INTO failed_updates VALUES (?, ?, ?, ?, ?, ?)",
@@ -58,7 +65,7 @@ class AdapterStore:
         return await asyncio.to_thread(self._failed_update, account, update_id)
 
     def _failed_update(self, account: str, update_id: int) -> Optional[Dict[str, Any]]:
-        with sqlite3.connect(self.path) as db:
+        with self._connect() as db:
             row = db.execute(
                 "SELECT payload, error, traceback, failed_at FROM failed_updates WHERE account = ? AND update_id = ?",
                 (account, update_id),
@@ -69,7 +76,7 @@ class AdapterStore:
         await asyncio.to_thread(self._save_message_group, account, message_id, group)
 
     def _save_message_group(self, account: str, message_id: str, group: Dict[str, str]) -> None:
-        with sqlite3.connect(self.path) as db:
+        with self._connect() as db:
             db.execute("INSERT OR REPLACE INTO message_groups VALUES (?, ?, ?, ?)",
                        (account, message_id, group["group_id"], group["group_name"]))
 
@@ -77,7 +84,7 @@ class AdapterStore:
         return await asyncio.to_thread(self._message_group, account, message_id)
 
     def _message_group(self, account: str, message_id: str) -> Optional[Dict[str, str]]:
-        with sqlite3.connect(self.path) as db:
+        with self._connect() as db:
             row = db.execute("SELECT group_id, group_name FROM message_groups WHERE account = ? AND message_id = ?",
                              (account, message_id)).fetchone()
         return {"group_id": row[0], "group_name": row[1]} if row else None
@@ -86,7 +93,7 @@ class AdapterStore:
         return await asyncio.to_thread(self._topic_name, account, chat_id, thread_id, name)
 
     def _topic_name(self, account: str, chat_id: str, thread_id: int, name: str) -> str:
-        with sqlite3.connect(self.path) as db:
+        with self._connect() as db:
             if name:
                 db.execute("INSERT OR REPLACE INTO topics VALUES (?, ?, ?, ?)", (account, chat_id, thread_id, name))
             row = db.execute("SELECT name FROM topics WHERE account = ? AND chat_id = ? AND thread_id = ?",
@@ -97,7 +104,7 @@ class AdapterStore:
         return await asyncio.to_thread(self._offset, account)
 
     def _offset(self, account: str) -> int:
-        with sqlite3.connect(self.path) as db:
+        with self._connect() as db:
             row = db.execute("SELECT offset, updated_at FROM cursors WHERE account = ?", (account,)).fetchone()
         # Telegram 在一周没有更新后会随机选择新的 update_id；旧高位 offset 不能继续使用。
         return row[0] if row and time.time() - row[1] < 7 * 86400 else 0
@@ -106,14 +113,14 @@ class AdapterStore:
         await asyncio.to_thread(self._save_offset, account, offset)
 
     def _save_offset(self, account: str, offset: int) -> None:
-        with sqlite3.connect(self.path) as db:
+        with self._connect() as db:
             db.execute("INSERT OR REPLACE INTO cursors VALUES (?, ?, ?)", (account, offset, time.time()))
 
     async def sticker(self, account: str, binary_hash: str) -> Optional[str]:
         return await asyncio.to_thread(self._sticker, account, binary_hash)
 
     def _sticker(self, account: str, binary_hash: str) -> Optional[str]:
-        with sqlite3.connect(self.path) as db:
+        with self._connect() as db:
             row = db.execute(
                 "SELECT file_id FROM stickers WHERE account = ? AND hash = ?", (account, binary_hash)
             ).fetchone()
@@ -123,5 +130,5 @@ class AdapterStore:
         await asyncio.to_thread(self._save_sticker, account, binary_hash, file_id)
 
     def _save_sticker(self, account: str, binary_hash: str, file_id: str) -> None:
-        with sqlite3.connect(self.path) as db:
+        with self._connect() as db:
             db.execute("INSERT OR REPLACE INTO stickers VALUES (?, ?, ?)", (account, binary_hash, file_id))
